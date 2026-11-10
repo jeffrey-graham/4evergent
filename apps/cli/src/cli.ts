@@ -10,6 +10,7 @@
  *   FOREGENT_API_URL  — API base URL (default: http://127.0.0.1:3000)
  *   FOREGENT_API_KEY  — Bearer API key (production auth mode)
  *   FOREGENT_API_TIMEOUT_MS — Per-request timeout in ms (default: 5000)
+ *   FOREGENT_OUTPUT   — Set to "json" for machine-readable JSON output (or pass --json)
  */
 
 import { exit } from "node:process";
@@ -22,6 +23,18 @@ const VERSION: string = createRequire(import.meta.url)("../package.json").versio
 
 const API_URL = process.env.FOREGENT_API_URL ?? "http://127.0.0.1:3000";
 const API_KEY = process.env.FOREGENT_API_KEY;
+
+const rawArgv = process.argv.slice(2);
+const hasJsonFlag = rawArgv.includes("--json");
+const argv = rawArgv.filter((arg) => arg !== "--json");
+
+function isJsonMode(): boolean {
+  return hasJsonFlag || process.env.FOREGENT_OUTPUT?.trim().toLowerCase() === "json";
+}
+
+function printJson(value: unknown): void {
+  console.log(JSON.stringify(value, null, 2));
+}
 
 // Every request is bounded by a finite deadline so an unresponsive server can
 // never hang the caller's shell. Override per invocation with
@@ -180,6 +193,10 @@ function _formatApproval(a: any) {
 async function cmdHealth() {
   try {
     const { body } = await request("/health");
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`API Status: ${body.status === "ok" ? "healthy" : "unhealthy"}`);
     console.log(`Signer: ${body.signerAccountId?.slice(0, 12)}...`);
     return 0;
@@ -192,6 +209,10 @@ async function cmdHealth() {
 async function cmdAgentList() {
   try {
     const { body } = await request("/agents");
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     if (!body.agents || body.agents.length === 0) {
       console.log("No agents found.");
       return 0;
@@ -213,6 +234,10 @@ async function cmdAgentGet(agentId: string) {
   }
   try {
     const { body } = await request(`/agents/${encodeURIComponent(agentId)}`);
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(formatAgent(body));
     return 0;
   } catch (err: any) {
@@ -232,6 +257,10 @@ async function cmdAgentStatus(agentId: string, status: "active" | "paused" | "di
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status }),
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`Agent ${body.id} status: ${body.status}`);
     return 0;
   } catch (err: any) {
@@ -243,6 +272,10 @@ async function cmdAgentStatus(agentId: string, status: "active" | "paused" | "di
 async function cmdApprovalList() {
   try {
     const { body } = await request("/approvals");
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     if (!body.approvals || body.approvals.length === 0) {
       console.log("No approvals found.");
       return 0;
@@ -269,6 +302,10 @@ async function cmdApprovalAction(approvalId: string, action: "approve" | "reject
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`Approval ${body.status}: agent=${body.agentId} activity=${body.activityId}`);
     if (body.message) console.log(`  ${body.message}`);
     return 0;
@@ -281,6 +318,10 @@ async function cmdApprovalAction(approvalId: string, action: "approve" | "reject
 async function cmdExecutionList() {
   try {
     const { body } = await request("/executions?limit=100");
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     const all: any[] = body.executions ?? [];
     if (all.length === 0) {
       console.log("No executions found.");
@@ -306,6 +347,10 @@ async function cmdExecutionGet(executionId: string) {
   }
   try {
     const { body } = await request(`/executions/${encodeURIComponent(executionId)}`);
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(formatExecution(body.execution));
     return 0;
   } catch (err: any) {
@@ -321,6 +366,10 @@ async function cmdApprovalGet(approvalId: string) {
   }
   try {
     const { body } = await request(`/approvals/${encodeURIComponent(approvalId)}`);
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(_formatApproval(body.approval ?? body));
     return 0;
   } catch (err: any) {
@@ -340,6 +389,10 @@ async function cmdExecutionRetry(executionId: string) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`Execution ${body.execution?.id ?? executionId} retry queued: ${body.message ?? "ok"}`);
     return 0;
   } catch (err: any) {
@@ -359,6 +412,10 @@ async function cmdExecutionCancel(executionId: string) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`Execution ${body.execution?.id ?? executionId} cancelled: ${body.message ?? "ok"}`);
     return 0;
   } catch (err: any) {
@@ -494,6 +551,10 @@ async function cmdPolicyGet(agentId: string) {
   }
   try {
     const { body } = await request(`/agents/${encodeURIComponent(agentId)}/policy`);
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(formatPolicy(body));
     return 0;
   } catch (err: any) {
@@ -514,6 +575,10 @@ async function cmdActivityList(agentId: string, limit: string) {
   }
   try {
     const { body } = await request(`/agents/${encodeURIComponent(agentId)}/activity?limit=${n}`);
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     const activity = body.activity ?? [];
     if (activity.length === 0) {
       console.log("No activity found.");
@@ -539,6 +604,10 @@ async function cmdActivityGet(agentId: string, activityId: string) {
     const { body } = await request(
       `/agents/${encodeURIComponent(agentId)}/activity/${encodeURIComponent(activityId)}`,
     );
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(formatActivity(body.activity));
     return 0;
   } catch (err: any) {
@@ -559,6 +628,10 @@ async function cmdScheduleList(agentId: string, limit: string) {
   }
   try {
     const { body } = await request(`/agents/${encodeURIComponent(agentId)}/schedules?limit=${n}`);
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     const schedules = body.schedules ?? [];
     if (schedules.length === 0) {
       console.log("No schedules found.");
@@ -582,6 +655,10 @@ async function cmdScheduleGet(agentId: string, scheduleId: string) {
   }
   try {
     const { body } = await request(`/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`);
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(formatSchedule(body.schedule));
     return 0;
   } catch (err: any) {
@@ -620,6 +697,10 @@ async function cmdIntentSubmit(agentId: string, args: string[], idempotencyKey: 
       headers,
       body: JSON.stringify(intent),
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     // 200 = idempotent duplicate, 202 = accepted (requires approval or executing)
     console.log(`Intent ${status === 200 ? "(idempotent duplicate)" : status === 202 ? "(accepted)" : "(submitted)"}: agent=${body.agentId} activity=${body.activityId} status=${body.status}`);
     if (body.approvalId) console.log(`  Approval required: approvalId=${body.approvalId}`);
@@ -678,6 +759,10 @@ async function cmdAgentCreate(args: string[]) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ displayName, description, capabilities, stellarAddress }),
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`Agent created:\n  ID: ${body.agent.id}\n  Name: ${body.agent.displayName}\n  Status: ${body.agent.status}`);
     return 0;
   } catch (err: any) {
@@ -710,6 +795,10 @@ async function cmdPolicyUpdate(agentId: string, args: string[]) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(policy),
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`Policy updated:\n  Agent: ${body.agentId}\n  Version: ${body.version}`);
     return 0;
   } catch (err: any) {
@@ -744,6 +833,10 @@ async function cmdScheduleCreate(agentId: string, args: string[]) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ intent, scheduleExpression: expression, timezone }),
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`Schedule created:\n  ID: ${body.schedule.id}\n  Expression: ${body.schedule.scheduleExpression}\n  Timezone: ${body.schedule.timezone}\n  Next Run: ${body.schedule.nextRunAt}`);
     return 0;
   } catch (err: any) {
@@ -766,6 +859,10 @@ async function cmdScheduleUpdate(agentId: string, args: string[]) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ scheduleExpression: expression }),
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`Schedule updated:\n  ID: ${body.schedule.id}\n  Expression: ${body.schedule.scheduleExpression}\n  Next Run: ${body.schedule.nextRunAt}`);
     return 0;
   } catch (err: any) {
@@ -785,6 +882,10 @@ async function cmdSchedulePause(agentId: string, scheduleId: string) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`Schedule paused:\n  ID: ${body.schedule.id}\n  Status: ${body.schedule.status}`);
     return 0;
   } catch (err: any) {
@@ -804,6 +905,10 @@ async function cmdScheduleResume(agentId: string, scheduleId: string) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`Schedule resumed:\n  ID: ${body.schedule.id}\n  Status: ${body.schedule.status}`);
     return 0;
   } catch (err: any) {
@@ -823,6 +928,10 @@ async function cmdScheduleDisable(agentId: string, scheduleId: string) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`Schedule disabled:\n  ID: ${body.schedule.id}\n  Status: ${body.schedule.status}`);
     return 0;
   } catch (err: any) {
@@ -837,9 +946,13 @@ async function cmdScheduleDelete(agentId: string, scheduleId: string) {
     return 1;
   }
   try {
-    await request(`/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`, {
+    const { body } = await request(`/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`, {
       method: "DELETE",
     });
+    if (isJsonMode()) {
+      printJson(body);
+      return 0;
+    }
     console.log(`Schedule deleted: ${scheduleId}`);
     return 0;
   } catch (err: any) {
@@ -850,9 +963,12 @@ async function cmdScheduleDelete(agentId: string, scheduleId: string) {
 
 // --- CLI dispatch ---
 
-// --- CLI dispatch ---
-
-const argv = process.argv.slice(2);
+const CLI_HELP = [
+  COMMANDS_HELP,
+  "",
+  "Global Flags:",
+  "  --json         Output raw API response as formatted JSON (or set FOREGENT_OUTPUT=json)",
+].join("\n");
 
 export const dispatcherTree = buildCommandTree({
   health: () => cmdHealth(),
@@ -912,7 +1028,7 @@ export const dispatcherTree = buildCommandTree({
 async function main(): Promise<number> {
   return dispatchCommand(dispatcherTree, argv, {
     version: VERSION,
-    helpText: COMMANDS_HELP,
+    helpText: CLI_HELP,
   });
 }
 

@@ -1607,3 +1607,110 @@ test("Handler error paths: non-2xx on schedule command, invalid JSON in contract
   assert.equal((await runHandlerWithMockFetch([], (m) => m.cmdIntentSubmit("", [], null))).code, 1);
 });
 
+// ===== #57 JSON output mode (--json & FOREGENT_OUTPUT=json) =====
+
+test("CLI --json: --help documents --json and FOREGENT_OUTPUT=json", () => {
+  const r = run(["--help"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /--json/);
+  assert.match(r.stdout, /FOREGENT_OUTPUT=json/);
+});
+
+test("CLI --json: outputs valid JSON with expected keys for health, agent list, agent get, approval list, execution list, execution get, policy get, activity list, schedule list", () => {
+  const mockResponses = [
+    {
+      match: "/health",
+      status: 200,
+      body: { status: "ok", signerAccountId: "GBDMPFEAZOQW7XVTAVPXBT7PPA4ZZW7ZFJW5KJNBYRPJ35H6ASW4ASE3" },
+    },
+    {
+      match: "/agents/agent-1/policy",
+      status: 200,
+      body: { agentId: "agent-1", policy: { maxTxAmount: { XLM: "500" } }, version: 3 },
+    },
+    {
+      match: "/agents/agent-1/activity",
+      status: 200,
+      body: { agentId: "agent-1", activity: [{ id: "act-1", agentId: "agent-1", status: "confirmed" }] },
+    },
+    {
+      match: "/agents/agent-1/schedules",
+      status: 200,
+      body: { agentId: "agent-1", schedules: [{ id: "sch-1", agentId: "agent-1", status: "active" }] },
+    },
+    {
+      match: "/agents/agent-1",
+      status: 200,
+      body: { id: "agent-1", displayName: "Alpha Agent", status: "active", stellarAddress: "GAAA" },
+    },
+    {
+      match: "/agents",
+      status: 200,
+      body: { agents: [{ id: "agent-1", displayName: "Alpha Agent", status: "active" }] },
+    },
+    {
+      match: "/approvals",
+      status: 200,
+      body: { approvals: [{ id: "ap-1", agentId: "agent-1", status: "pending_approval" }] },
+    },
+    {
+      match: "/executions/exec-1",
+      status: 200,
+      body: { execution: { id: "exec-1", agentId: "agent-1", status: "confirmed", txHash: "ab".repeat(32) } },
+    },
+    {
+      match: "/executions",
+      status: 200,
+      body: { executions: [{ id: "exec-1", agentId: "agent-1", status: "confirmed" }] },
+    },
+  ];
+
+  const cases: Array<{ args: string[]; expectedKey: string }> = [
+    { args: ["health", "--json"], expectedKey: "signerAccountId" },
+    { args: ["agent", "list", "--json"], expectedKey: "agents" },
+    { args: ["agent", "get", "agent-1", "--json"], expectedKey: "displayName" },
+    { args: ["approval", "list", "--json"], expectedKey: "approvals" },
+    { args: ["execution", "list", "--json"], expectedKey: "executions" },
+    { args: ["execution", "get", "exec-1", "--json"], expectedKey: "execution" },
+    { args: ["policy", "get", "agent-1", "--json"], expectedKey: "policy" },
+    { args: ["activity", "list", "agent-1", "--json"], expectedKey: "activity" },
+    { args: ["--json", "schedule", "list", "agent-1"], expectedKey: "schedules" },
+  ];
+
+  for (const c of cases) {
+    const r = run(c.args, { responses: mockResponses });
+    assert.equal(r.code, 0, `expected exit 0 for ${c.args.join(" ")}, got stderr=${r.stderr}`);
+    const parsed = JSON.parse(r.stdout);
+    assert.ok(c.expectedKey in parsed, `expected key '${c.expectedKey}' in ${r.stdout}`);
+  }
+});
+
+test("CLI --json: FOREGENT_OUTPUT=json produces identical JSON output and default human output is unchanged", () => {
+  const agentListResponse = [
+    {
+      match: "/agents",
+      status: 200,
+      body: { agents: [{ id: "agent-1", displayName: "Alpha Agent", status: "active" }] },
+    },
+  ];
+
+  const viaFlag = run(["agent", "list", "--json"], { responses: agentListResponse });
+  const viaEnv = run(["agent", "list"], {
+    env: { FOREGENT_OUTPUT: "json" },
+    responses: agentListResponse,
+  });
+  const humanDefault = run(["agent", "list"], { responses: agentListResponse });
+
+  assert.equal(viaFlag.code, 0);
+  assert.equal(viaEnv.code, 0);
+  assert.equal(viaFlag.stdout, viaEnv.stdout);
+  assert.deepEqual(JSON.parse(viaEnv.stdout), {
+    agents: [{ id: "agent-1", displayName: "Alpha Agent", status: "active" }],
+  });
+
+  // Human output without --json or FOREGENT_OUTPUT=json stays byte-identical
+  assert.equal(humanDefault.code, 0);
+  assert.equal(humanDefault.stdout, "agent-1\tAlpha Agent\tactive\n");
+});
+
+
