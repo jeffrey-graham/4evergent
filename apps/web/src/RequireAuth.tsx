@@ -1,8 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { getStoredToken, clearAuth } from './auth';
-import { api, ApiError } from './api';
+import { api, isUnauthorizedError, onSessionExpired } from './api';
 import Login from './pages/Login';
 import LogoMark from './components/LogoMark';
+
+export const SESSION_EXPIRED_MESSAGE =
+  'Your session has expired. Please sign in again to continue.';
 
 /**
  * Validate the current session against the API.
@@ -14,7 +17,7 @@ export async function validateSession(): Promise<boolean> {
     await api.me();
     return true; // real browser session
   } catch (err) {
-    if (err instanceof ApiError && err.status === 401) {
+    if (isUnauthorizedError(err)) {
       // No/invalid session — try the legacy bearer path if a token exists.
       if (getStoredToken()) {
         try {
@@ -34,6 +37,7 @@ export async function validateSession(): Promise<boolean> {
 
 export function RequireAuth({ children }: { children: React.ReactNode }) {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [sessionExpired, setSessionExpired] = useState(false);
 
   const check = useCallback(() => {
     validateSession().then(setAuthenticated);
@@ -42,6 +46,13 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     check();
   }, [check]);
+
+  useEffect(() => {
+    return onSessionExpired(() => {
+      setSessionExpired(true);
+      setAuthenticated(false);
+    });
+  }, []);
 
   if (authenticated === null) {
     return (
@@ -56,7 +67,21 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
   }
 
   if (authenticated === false) {
-    return <Login onSuccess={() => setAuthenticated(true)} />;
+    return (
+      <>
+        {sessionExpired && (
+          <div className="error-banner session-expired-notice" role="alert">
+            {SESSION_EXPIRED_MESSAGE}
+          </div>
+        )}
+        <Login
+          onSuccess={() => {
+            setSessionExpired(false);
+            setAuthenticated(true);
+          }}
+        />
+      </>
+    );
   }
 
   return <>{children}</>;

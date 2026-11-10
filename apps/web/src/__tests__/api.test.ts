@@ -113,31 +113,45 @@ describe('api.request 401 handling (skipAuthClear)', () => {
     sessionStorage.clear();
   });
 
-  it('clears the stored token on a default 401', async () => {
+  it('clears the stored token and notifies session expiry listeners on a default 401', async () => {
     sessionStorage.setItem('4evergent.auth.token', 'will-be-cleared');
     sessionStorage.setItem('4evergent.auth.subject', 'sub-1');
     mockFetch(401, { error: 'unauthorized' });
 
-    const { api } = await import('../api');
+    const { api, onSessionExpired } = await import('../api');
+    const listener = vi.fn();
+    const unsubscribe = onSessionExpired(listener);
+
     await expect(api.updateAgentStatus('a', 'x')).rejects.toThrow(ApiError);
     expect(sessionStorage.getItem('4evergent.auth.token')).toBeNull();
     expect(sessionStorage.getItem('4evergent.auth.subject')).toBeNull();
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
   });
 
-  it('keeps the stored token on a 401 when skipAuthClear is set (api.me)', async () => {
+  it('keeps the stored token and does not emit session expiry when skipAuthClear is set (api.me)', async () => {
     sessionStorage.setItem('4evergent.auth.token', 'preserve-me');
     mockFetch(401, { error: 'unauthorized' });
 
-    const { api } = await import('../api');
+    const { api, onSessionExpired } = await import('../api');
+    const listener = vi.fn();
+    const unsubscribe = onSessionExpired(listener);
+
     await expect(api.me()).rejects.toThrow(ApiError);
     expect(sessionStorage.getItem('4evergent.auth.token')).toBe('preserve-me');
+    expect(listener).not.toHaveBeenCalled();
+    unsubscribe();
   });
 
-  it('throws ApiError with status and message on a non-OK response', async () => {
+  it('throws ApiError on non-401 error without clearing credentials or emitting session expiry', async () => {
     sessionStorage.setItem('4evergent.auth.token', 't');
+    sessionStorage.setItem('4evergent.auth.subject', 'sub-1');
     mockFetch(500, { error: 'server broken' });
 
-    const { api } = await import('../api');
+    const { api, onSessionExpired } = await import('../api');
+    const listener = vi.fn();
+    const unsubscribe = onSessionExpired(listener);
+
     try {
       await api.health();
       expect.fail('should have thrown');
@@ -145,7 +159,12 @@ describe('api.request 401 handling (skipAuthClear)', () => {
       expect(e).toBeInstanceOf(ApiError);
       expect((e as ApiError).status).toBe(500);
       expect((e as ApiError).message).toBe('server broken');
+      expect(isUnauthorizedError(e)).toBe(false);
     }
+    expect(sessionStorage.getItem('4evergent.auth.token')).toBe('t');
+    expect(sessionStorage.getItem('4evergent.auth.subject')).toBe('sub-1');
+    expect(listener).not.toHaveBeenCalled();
+    unsubscribe();
   });
 });
 
