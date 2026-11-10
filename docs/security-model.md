@@ -114,6 +114,10 @@ Stellar's native sequence numbers are used. Each transaction includes:
 - Timebounds (valid window)
 - (Future) Memo for intent correlation
 
+At the HTTP API boundary, `POST /agents/:id/intents` also supports client-supplied `Idempotency-Key` headers scoped to `(ownerId, agentId, key)` with a configurable replay window (`IDEMPOTENCY_TTL_SECONDS`, default `86400` seconds / 24 hours; see ADR-023 in [architecture.md](architecture.md)):
+- **What the window protects against:** Duplicate client retries (e.g. after network timeouts or lost responses) within the replay window return the original activity record (`200`) instead of re-evaluating policy or submitting a second transaction, and accidental key reuse with a modified payload inside the window is rejected with `409 IDEMPOTENCY_CONFLICT`.
+- **What the window does not protect against:** It does not suppress a retry sent *after* `IDEMPOTENCY_TTL_SECONDS` has elapsed, nor does it deduplicate two requests that omit `Idempotency-Key` or send distinct keys for the same payment parameters. When a key expires, only the `idempotency_key` suppression binding is cleared (`NULL`); the underlying `ActivityRecord` audit entry is never deleted.
+
 ## Spending Limits
 
 | Limit | Default | Scope |

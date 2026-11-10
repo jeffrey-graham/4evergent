@@ -8,11 +8,13 @@ import type {
 } from "@4evergent/shared";
 import { getSharedConnection } from "./shared-connection.js";
 import { clampOffset, clampLimit } from "./pagination.js";
-import type {
-  ActivityStore,
-  ApprovalStore,
-  ApprovalRecord,
-  ApprovalStatus,
+import {
+  DEFAULT_IDEMPOTENCY_TTL_SECONDS,
+  type ActivityStore,
+  type ActivityStoreOptions,
+  type ApprovalStore,
+  type ApprovalRecord,
+  type ApprovalStatus,
 } from "./index.js";
 
 /**
@@ -27,10 +29,24 @@ import type {
  */
 export class SQLiteActivityStore implements ActivityStore {
   private db: DatabaseSync;
+  private idempotencyTtlMs: number;
+  private clock: () => Date;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, options: ActivityStoreOptions = {}) {
     this.db = getSharedConnection(dbPath);
+    const ttlSeconds =
+      options.idempotencyTtlSeconds !== undefined &&
+      Number.isFinite(options.idempotencyTtlSeconds) &&
+      options.idempotencyTtlSeconds > 0
+        ? options.idempotencyTtlSeconds
+        : DEFAULT_IDEMPOTENCY_TTL_SECONDS;
+    this.idempotencyTtlMs = Math.round(ttlSeconds * 1000);
+    this.clock = options.clock ?? (() => new Date());
     this.initSchema();
+  }
+
+  private getIdempotencyCutoffIso(now = this.clock()): string {
+    return new Date(now.getTime() - this.idempotencyTtlMs).toISOString();
   }
 
   private initSchema(): void {
@@ -78,6 +94,15 @@ export class SQLiteActivityStore implements ActivityStore {
   }
 
   async record(record: ActivityRecord): Promise<void> {
+    if (record.idempotencyKey) {
+      const cutoffIso = this.getIdempotencyCutoffIso();
+      this.db
+        .prepare(
+          `UPDATE activities SET idempotency_key = NULL
+           WHERE owner_id = ? AND agent_id = ? AND idempotency_key = ? AND id != ? AND created_at <= ?`
+        )
+        .run(record.ownerId, record.agentId, record.idempotencyKey, record.id, cutoffIso);
+    }
     this.db
       .prepare(
         `INSERT OR REPLACE INTO activities
@@ -146,10 +171,38 @@ export class SQLiteActivityStore implements ActivityStore {
   }
 
   async getByIdempotencyKey(ownerId: string, agentId: string, key: string): Promise<ActivityRecord | null> {
+    const cutoffIso = this.getIdempotencyCutoffIso();
+    // Clear expired idempotency_key binding without deleting the activity audit record
+    this.db
+      .prepare(
+        `UPDATE activities SET idempotency_key = NULL
+         WHERE owner_id = ? AND agent_id = ? AND idempotency_key = ? AND created_at <= ?`
+      )
+      .run(ownerId, agentId, key, cutoffIso);
     const row = this.db
-      .prepare("SELECT * FROM activities WHERE owner_id = ? AND agent_id = ? AND idempotency_key = ?")
-      .get(ownerId, agentId, key);
+      .prepare(
+        `SELECT * FROM activities
+         WHERE owner_id = ? AND agent_id = ? AND idempotency_key = ? AND created_at > ?`
+      )
+      .get(ownerId, agentId, key, cutoffIso);
     return row ? rowToActivityRecord(row as unknown as ActivityRow) : null;
+  }
+
+  async sweepExpiredIdempotencyKeys(now = this.clock(), limit = 500): Promise<number> {
+    if (!Number.isInteger(limit) || limit <= 0) return 0;
+    const cutoffIso = this.getIdempotencyCutoffIso(now);
+    const result = this.db
+      .prepare(
+        `UPDATE activities SET idempotency_key = NULL
+         WHERE id IN (
+           SELECT id FROM activities
+           WHERE idempotency_key IS NOT NULL AND created_at <= ?
+           ORDER BY created_at ASC
+           LIMIT ?
+         )`
+      )
+      .run(cutoffIso, limit);
+    return Number(result.changes ?? 0);
   }
 
   /**

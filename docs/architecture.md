@@ -242,3 +242,17 @@ When `AUTH_TRUST_PROXY=1` is enabled, the trusted reverse proxy MUST be configur
 - Bounded recovery guarantees all interrupted records are reconciled across multiple pages.
 - The scheduler never starts if recovery fails or has unrecovered records.
 - Transaction finality is not conflated with process crash recovery.
+
+## ADR-023: Idempotency-Key replay window and non-destructive key expiry
+
+**Status:** Accepted
+
+**Context:** `POST /agents/:id/intents` accepts an optional `Idempotency-Key` header scoped to `(owner_id, agent_id, idempotency_key)` so client retries cannot produce duplicate financial executions. Previously, `InMemoryActivityStore` held keys for the process lifetime while `SQLiteActivityStore` held them indefinitely in a partial unique index (`WHERE idempotency_key IS NOT NULL`). This left clients without a stated retry horizon, caused the two store backends to disagree on key lifetime, and grew the SQLite unique index without bound. At the same time, `activities` is the immutable decision audit trail (ADR-010), so expiring an idempotency key must never delete the activity record itself.
+
+**Decision:** Define a conservative 24-hour default replay window (`DEFAULT_IDEMPOTENCY_TTL_SECONDS = 86400`, configurable via `IDEMPOTENCY_TTL_SECONDS` and `ActivityStoreOptions.idempotencyTtlSeconds`) enforced identically in both `InMemoryActivityStore` and `SQLiteActivityStore`. When an activity's `createdAt` is older than the configured window (`now - createdAt >= idempotencyTtlMs`), its `idempotencyKey` / `idempotency_key` attribute is cleared to `null` (both lazily on `getByIdempotencyKey` / `record` / `recordIdempotent` and in bounded batches via `sweepExpiredIdempotencyKeys`) while leaving the `ActivityRecord` row itself intact.
+
+**Consequences:**
+- Both `InMemoryActivityStore` and `SQLiteActivityStore` enforce the exact same replay window and cleanup semantics.
+- Inside the window (default 24h), repeating the same key and intent returns the original activity (`200`), and reusing the key with a different intent returns `409 IDEMPOTENCY_CONFLICT`.
+- After the window, clearing `idempotency_key = NULL` removes the entry from SQLite's partial unique index (`WHERE idempotency_key IS NOT NULL`) so a post-window reuse of the same key creates a fresh activity without hitting a `UNIQUE` constraint violation or overwriting the historical audit record.
+- No activity audit records are ever deleted by idempotency key expiry.

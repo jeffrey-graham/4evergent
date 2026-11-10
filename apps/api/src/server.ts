@@ -393,6 +393,7 @@ async function main() {
       },
       executionQueue: { enabled: true, intervalMs: workerIntervals.executionQueueIntervalMs },
       reconciliation: { enabled: true, intervalMs: workerIntervals.reconciliationIntervalMs },
+      idempotencyTtlSeconds: envPositiveInt(process.env.IDEMPOTENCY_TTL_SECONDS),
       authProvider,
       authModule,
       corsOrigin: webOrigin,

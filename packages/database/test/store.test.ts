@@ -504,3 +504,65 @@ test("state machine: full 8×8 matrix coverage — exactly 12 legal and 52 illeg
   assert.equal(legalCount, 12, `Expected exactly 12 legal transitions, got ${legalCount}`);
   assert.equal(illegalCount, 52, `Expected exactly 52 illegal transitions, got ${illegalCount}`);
 });
+
+for (const kind of ["InMemory", "SQLite"] as const) {
+  test(`${kind}: Idempotency-Key expiry window — suppresses within window, expires after window while preserving audit record`, async () => {
+    let nowMs = Date.parse("2026-01-01T00:00:00.000Z");
+    const clock = () => new Date(nowMs);
+    let store: InMemoryActivityStore | SQLiteActivityStore;
+    let dir: string | undefined;
+    if (kind === "SQLite") {
+      dir = mkdtempSync(join(tmpdir(), "4evergent-idem-expiry-"));
+      store = new SQLiteActivityStore(join(dir, "idem.db"), { idempotencyTtlSeconds: 60, clock });
+    } else {
+      store = new InMemoryActivityStore({ idempotencyTtlSeconds: 60, clock });
+    }
+
+    try {
+      const first = createActivity("agent-a", "owner-a", makeIntent("10"), makeDecision());
+      first.createdAt = new Date(nowMs).toISOString();
+      first.updatedAt = first.createdAt;
+
+      const res1 = await store.recordIdempotent("idem-exp-1", first);
+      assert.equal(res1.created, true);
+      assert.equal(res1.record.id, first.id);
+
+      // Inside the 60s window (t = +30s): lookup and recordIdempotent return the original activity
+      nowMs += 30_000;
+      const withinWindow = await store.getByIdempotencyKey("owner-a", "agent-a", "idem-exp-1");
+      assert.ok(withinWindow, "key must still resolve inside the replay window");
+      assert.equal(withinWindow?.id, first.id);
+
+      const secondInside = createActivity("agent-a", "owner-a", makeIntent("10"), makeDecision());
+      secondInside.createdAt = new Date(nowMs).toISOString();
+      secondInside.updatedAt = secondInside.createdAt;
+      const resInside = await store.recordIdempotent("idem-exp-1", secondInside);
+      assert.equal(resInside.created, false);
+      assert.equal(resInside.record.id, first.id);
+
+      // After the 60s window (t = +61s): key suppression expires; new activity can be created with the same key
+      nowMs += 31_000;
+      const afterWindowLookup = await store.getByIdempotencyKey("owner-a", "agent-a", "idem-exp-1");
+      assert.equal(afterWindowLookup, null);
+
+      const postExpiry = createActivity("agent-a", "owner-a", makeIntent("25"), makeDecision());
+      postExpiry.createdAt = new Date(nowMs).toISOString();
+      postExpiry.updatedAt = postExpiry.createdAt;
+      const resAfter = await store.recordIdempotent("idem-exp-1", postExpiry);
+      assert.equal(resAfter.created, true);
+      assert.equal(resAfter.record.id, postExpiry.id);
+
+      // Both the original and the new activity audit records remain intact in the store
+      const originalAudit = await store.get(first.id);
+      assert.ok(originalAudit, "original activity audit record must never be deleted by key expiry");
+      assert.equal(originalAudit?.intent.type === "payment" ? originalAudit.intent.amount : "", "10");
+
+      const newAudit = await store.get(postExpiry.id);
+      assert.ok(newAudit);
+      assert.equal(newAudit?.idempotencyKey, "idem-exp-1");
+    } finally {
+      if (store instanceof SQLiteActivityStore) store.close();
+      if (dir) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

@@ -166,12 +166,24 @@ export interface ServerOptions {
     intervalMs?: number;
     instance?: import("@4evergent/stellar").TransactionStatusReconciler;
   };
+  /** Replay window for `Idempotency-Key` in seconds (default: 86400 = 24h; env: IDEMPOTENCY_TTL_SECONDS). */
+  idempotencyTtlSeconds?: number;
 }
 
 export async function createApiServer(options: ServerOptions) {
+  const envIdempotencyTtl = process.env.IDEMPOTENCY_TTL_SECONDS
+    ? Number(process.env.IDEMPOTENCY_TTL_SECONDS)
+    : undefined;
+  const idempotencyTtlSeconds =
+    options.idempotencyTtlSeconds ??
+    (envIdempotencyTtl !== undefined && Number.isFinite(envIdempotencyTtl) && envIdempotencyTtl > 0
+      ? envIdempotencyTtl
+      : undefined);
   const store: ActivityStore =
     options.activityStore ??
-    (options.dbPath ? new SQLiteActivityStore(options.dbPath) : new InMemoryActivityStore());
+    (options.dbPath
+      ? new SQLiteActivityStore(options.dbPath, { idempotencyTtlSeconds })
+      : new InMemoryActivityStore({ idempotencyTtlSeconds }));
   const approvals: ApprovalStore =
     options.approvalStore ??
     (options.dbPath ? new SQLiteApprovalStore(options.dbPath) : new InMemoryApprovalStore());
@@ -676,6 +688,7 @@ export async function createApiServer(options: ServerOptions) {
           dailySpendingDays: spendingDays,
           batchSize: 500,
         });
+        await store.sweepExpiredIdempotencyKeys?.(new Date(), 500);
         console.log(`[retention] sweep complete: auth_sessions=${result.authSessionsRemoved}, daily_spending=${result.dailySpendingRemoved}`);
       } catch (err) {
         console.error("[retention] sweep failed:", err);

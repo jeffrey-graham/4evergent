@@ -8,6 +8,16 @@ import type {
 } from "@4evergent/shared";
 import { clampOffset, clampLimit } from "./pagination.js";
 
+/** Default replay-suppression window for `Idempotency-Key` in seconds (24 hours). */
+export const DEFAULT_IDEMPOTENCY_TTL_SECONDS = 86_400;
+
+export interface ActivityStoreOptions {
+  /** Replay-suppression window for `Idempotency-Key` in seconds (default: 86400 = 24h). */
+  idempotencyTtlSeconds?: number;
+  /** Optional clock override for deterministic expiry tests. */
+  clock?: () => Date;
+}
+
 /**
  * ActivityStore — persistence interface for the transaction activity log.
  *
@@ -27,6 +37,8 @@ export interface ActivityStore {
   update(id: string, patch: Partial<ActivityRecord>): Promise<ActivityRecord | null>;
   getByIdempotencyKey(ownerId: string, agentId: string, key: string): Promise<ActivityRecord | null>;
   recordIdempotent(key: string, record: ActivityRecord): Promise<{ record: ActivityRecord; created: boolean }>;
+  /** Clear expired `idempotencyKey` bindings without deleting activity audit records. */
+  sweepExpiredIdempotencyKeys?(now?: Date, limit?: number): Promise<number>;
   /** Atomically reserve daily spending. Returns true if reservation succeeded, false if limit would be exceeded. */
   reserveDailySpending(agentId: string, asset: string, amount: string, limit: string, now?: Date): Promise<boolean>;
   /** Get current day's total spent for an agent. */
@@ -110,8 +122,41 @@ export class InMemoryActivityStore implements ActivityStore {
   private idempotencyLock: Promise<unknown> = Promise.resolve();
   /** Serializes daily-spending check+commit per store instance (atomicity). */
   private dailySpendingLock: Promise<unknown> = Promise.resolve();
+  private idempotencyTtlMs: number;
+  private clock: () => Date;
+
+  constructor(options: ActivityStoreOptions = {}) {
+    const ttlSeconds =
+      options.idempotencyTtlSeconds !== undefined &&
+      Number.isFinite(options.idempotencyTtlSeconds) &&
+      options.idempotencyTtlSeconds > 0
+        ? options.idempotencyTtlSeconds
+        : DEFAULT_IDEMPOTENCY_TTL_SECONDS;
+    this.idempotencyTtlMs = Math.round(ttlSeconds * 1000);
+    this.clock = options.clock ?? (() => new Date());
+  }
+
+  private isIdempotencyKeyExpired(createdAt: string, nowMs = this.clock().getTime()): boolean {
+    const createdMs = Date.parse(createdAt);
+    if (Number.isNaN(createdMs)) return false;
+    return nowMs - createdMs >= this.idempotencyTtlMs;
+  }
 
   async record(record: ActivityRecord): Promise<void> {
+    if (record.idempotencyKey) {
+      const nowMs = this.clock().getTime();
+      for (const existing of this.records.values()) {
+        if (
+          existing.id !== record.id &&
+          existing.ownerId === record.ownerId &&
+          existing.agentId === record.agentId &&
+          existing.idempotencyKey === record.idempotencyKey &&
+          this.isIdempotencyKeyExpired(existing.createdAt, nowMs)
+        ) {
+          existing.idempotencyKey = null;
+        }
+      }
+    }
     this.records.set(record.id, record);
   }
 
@@ -152,12 +197,32 @@ export class InMemoryActivityStore implements ActivityStore {
   }
 
   async getByIdempotencyKey(ownerId: string, agentId: string, key: string): Promise<ActivityRecord | null> {
+    const nowMs = this.clock().getTime();
     for (const rec of this.records.values()) {
       if (rec.ownerId === ownerId && rec.agentId === agentId && rec.idempotencyKey === key) {
+        if (this.isIdempotencyKeyExpired(rec.createdAt, nowMs)) {
+          // Clear expired key suppression while preserving the activity audit record
+          rec.idempotencyKey = null;
+          continue;
+        }
         return rec;
       }
     }
     return null;
+  }
+
+  async sweepExpiredIdempotencyKeys(now = this.clock(), limit = 500): Promise<number> {
+    if (!Number.isInteger(limit) || limit <= 0) return 0;
+    const nowMs = now.getTime();
+    let cleared = 0;
+    for (const rec of this.records.values()) {
+      if (rec.idempotencyKey != null && this.isIdempotencyKeyExpired(rec.createdAt, nowMs)) {
+        rec.idempotencyKey = null;
+        cleared++;
+        if (cleared >= limit) break;
+      }
+    }
+    return cleared;
   }
 
   /**

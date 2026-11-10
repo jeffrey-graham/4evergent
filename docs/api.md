@@ -282,8 +282,9 @@ Body: an `AgentIntent` union member (`packages/shared/src/types.ts`):
 - `account_settings`: `{ type, setting, value, reason }`
 
 Headers: optional `Idempotency-Key` (≤256 chars, scoped to owner+agent).
-Same key + same intent → returns the original activity (`200`).
-Same key + different intent → `409`.
+- **Replay window:** Keys are honoured for `86400` seconds (24 hours) by default from the original activity's `createdAt` timestamp. Operators can configure the window via the `IDEMPOTENCY_TTL_SECONDS` environment variable or `ServerOptions.idempotencyTtlSeconds` (`ActivityStoreOptions.idempotencyTtlSeconds` at the store layer).
+- **Inside the window:** Same key + same intent returns the original activity (`200`) with no duplicate execution; same key + different intent returns `409` (`IDEMPOTENCY_CONFLICT`).
+- **After the window:** The key's suppression binding expires (`idempotency_key` is cleared to `NULL`, while the historical `ActivityRecord` itself is permanently retained in the audit log) and a subsequent request with that key is treated as a fresh submission. Clients that need a retry guarantee across longer outages should generate a fresh key per logical operation once the replay window has elapsed.
 
 Agent status admission: the agent must be `active`. A `paused` or
 `disabled` agent rejects new intents before any activity, approval,

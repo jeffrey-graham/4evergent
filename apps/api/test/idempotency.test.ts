@@ -1,7 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createApiServer } from "../src/index.js";
 import { DevAuthProvider } from "@4evergent/shared";
+import { InMemoryActivityStore, SQLiteActivityStore, type ActivityStore } from "@4evergent/database";
 import type { Signer } from "@4evergent/stellar";
 import type { PolicyRules } from "@4evergent/shared";
 
@@ -34,7 +38,14 @@ function makeAgent(id: string, ownerId: string) {
   };
 }
 
-async function startServer(opts?: { policyRules?: Partial<PolicyRules>; signer?: Signer; ownerId?: string; agentId?: string }) {
+async function startServer(opts?: {
+  policyRules?: Partial<PolicyRules>;
+  signer?: Signer;
+  ownerId?: string;
+  agentId?: string;
+  activityStore?: ActivityStore;
+  idempotencyTtlSeconds?: number;
+}) {
   const signer = opts?.signer ?? new MockSigner("test-agent");
   const ownerId = opts?.ownerId ?? "test";
   const agentId = opts?.agentId ?? "test-agent";
@@ -43,6 +54,8 @@ async function startServer(opts?: { policyRules?: Partial<PolicyRules>; signer?:
     horizonUrl: "https://horizon-testnet.stellar.org",
     signer,
     policyRules: opts?.policyRules,
+    activityStore: opts?.activityStore,
+    idempotencyTtlSeconds: opts?.idempotencyTtlSeconds,
     authProvider: new DevAuthProvider({ defaultOwnerId: ownerId }),
   });
   server.registerAgent(makeAgent(agentId, ownerId));
@@ -181,3 +194,71 @@ test("TEST E: same owner+agent + different keys → multiple activities allowed"
     await close();
   }
 });
+
+for (const backend of ["InMemory", "SQLite"] as const) {
+  test(`TEST F (${backend}): Idempotency-Key expiry window — inside-window replay, inside-window 409 conflict, after-window new activity with audit trail preserved`, async () => {
+    let dir: string | undefined;
+    let activityStore: InMemoryActivityStore | SQLiteActivityStore;
+    // Short 0.08s (80ms) TTL so the test runs fast while exercising real store expiry
+    if (backend === "SQLite") {
+      dir = mkdtempSync(join(tmpdir(), "4evergent-api-idem-"));
+      activityStore = new SQLiteActivityStore(join(dir, "api-idem.db"), { idempotencyTtlSeconds: 0.08 });
+    } else {
+      activityStore = new InMemoryActivityStore({ idempotencyTtlSeconds: 0.08 });
+    }
+
+    const { baseUrl, close, store } = await startServer({ activityStore });
+    try {
+      const headers = { "Content-Type": "application/json", "Idempotency-Key": "idem-window-key" };
+
+      // 1. Initial submission creates activity (202 requires_approval)
+      const res1 = await fetch(`${baseUrl}/agents/test-agent/intents`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(INTENT_BODY),
+      });
+      assert.equal(res1.status, 202);
+      const body1 = await res1.json();
+
+      // 2. Inside window: same key + same intent returns 200 with original activityId
+      const resReplay = await fetch(`${baseUrl}/agents/test-agent/intents`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(INTENT_BODY),
+      });
+      assert.equal(resReplay.status, 200);
+      const bodyReplay = await resReplay.json();
+      assert.equal(bodyReplay.activityId, body1.activityId);
+
+      // 3. Inside window: same key + different intent returns 409 IDEMPOTENCY_CONFLICT
+      const resConflict = await fetch(`${baseUrl}/agents/test-agent/intents`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ...INTENT_BODY, amount: "250" }),
+      });
+      assert.equal(resConflict.status, 409);
+
+      // 4. Wait for the 80ms window to elapse, then reuse the same key -> creates a fresh activity
+      await new Promise((r) => setTimeout(r, 110));
+
+      const resAfter = await fetch(`${baseUrl}/agents/test-agent/intents`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(INTENT_BODY),
+      });
+      assert.equal(resAfter.status, 202);
+      const bodyAfter = await resAfter.json();
+      assert.notEqual(bodyAfter.activityId, body1.activityId);
+
+      // 5. Original activity audit record is still preserved in the store (never deleted)
+      const originalRecord = await store.get(body1.activityId);
+      assert.ok(originalRecord, "original activity audit record must be preserved after key expiry");
+      const newRecord = await store.get(bodyAfter.activityId);
+      assert.ok(newRecord, "new activity record must exist");
+    } finally {
+      await close();
+      if (activityStore instanceof SQLiteActivityStore) activityStore.close();
+      if (dir) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
