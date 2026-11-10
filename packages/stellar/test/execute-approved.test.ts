@@ -198,3 +198,189 @@ test("executeApproved records the signed hash when submission fails", async () =
     assert.equal(fixture.signer.calls, 1);
   });
 });
+
+test("executeApproved dispatches trustline intent to buildTrustline and reaches simulation (#44)", async () => {
+  await withOfflineAccount(async () => {
+    const activityStore = new InMemoryActivityStore();
+    const approvalStore = new InMemoryApprovalStore();
+    const trustlineIntent: AgentIntent = {
+      type: "trustline",
+      assetCode: "USDC",
+      issuer: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+      limit: "5000",
+      reason: "approved trustline execution test",
+    };
+    const decision: PolicyDecision = {
+      result: "requires_approval",
+      reason: "Requires human approval",
+      rule: "approvalThreshold",
+      intent: trustlineIntent,
+    };
+    const activity = createActivity("agent-1", "owner-1", trustlineIntent, decision);
+    activity.status = "requires_approval";
+    activity.authorizationStatus = "pending_approval";
+    await activityStore.record(activity);
+
+    const approval = createApproval(
+      activity.id,
+      "agent-1",
+      "owner-1",
+      trustlineIntent,
+      decision,
+      new Date(Date.now() + 60_000).toISOString(),
+    );
+    approval.status = "approved";
+    await approvalStore.record(approval);
+
+    const signer = new TestSigner();
+    const pipeline = new TransactionPipeline({
+      horizonUrl: HORIZON_URL,
+      networkPassphrase: PASSPHRASE,
+      signer,
+      activityStore,
+      approvalStore,
+      policyRules: {
+        maxTxAmount: { XLM: "100", USDC: "10000" },
+        dailySpendingLimit: { XLM: "500", USDC: "50000" },
+        allowedAssets: ["XLM", "USDC"],
+        requireHumanApprovalForAmountAbove: "100",
+        approvalThreshold: "100",
+        txTypeRestrictions: { payment: true, trustline: true },
+      },
+    });
+
+    // Keep the real StellarTransactionBuilder so buildTrustline actually constructs a Transaction,
+    // and stub only simulator.simulate to return a mock network/account simulation failure.
+    const internals = pipeline as unknown as {
+      builder: {
+        buildTrustline: (...args: any[]) => Promise<any>;
+        buildPayment: (...args: any[]) => Promise<any>;
+      };
+      simulator: { simulate: (tx: any) => Promise<any> };
+    };
+    let buildTrustlineCalls = 0;
+    let buildPaymentCalls = 0;
+    const realBuildTrustline = internals.builder.buildTrustline.bind(internals.builder);
+    const realBuildPayment = internals.builder.buildPayment.bind(internals.builder);
+    internals.builder.buildTrustline = async (...args: any[]) => {
+      buildTrustlineCalls++;
+      return realBuildTrustline(...args);
+    };
+    internals.builder.buildPayment = async (...args: any[]) => {
+      buildPaymentCalls++;
+      return realBuildPayment(...args);
+    };
+
+    let simulatedOpsCount = 0;
+    internals.simulator = {
+      simulate: async (tx: any) => {
+        simulatedOpsCount = tx.operations?.length ?? 0;
+        return {
+          success: false,
+          fee: null,
+          operations: simulatedOpsCount,
+          warnings: [],
+          error: "Mock network: account not funded on Horizon",
+        };
+      },
+    };
+
+    const result = await pipeline.executeApproved(approval.id, "reviewer-1");
+
+    assert.equal(buildTrustlineCalls, 1);
+    assert.equal(buildPaymentCalls, 0);
+    assert.equal(simulatedOpsCount, 1);
+    assert.equal(result.status, "simulation_failed");
+    assert.match(result.message, /Mock network: account not funded/);
+    assert.doesNotMatch(result.message, /expected payment intent/);
+  });
+});
+
+test("executeApproved invokes buildTrustline for trustline and buildPayment for payment (#44)", async () => {
+  await withOfflineAccount(async () => {
+    const calls: string[] = [];
+
+    for (const testIntent of [
+      intent,
+      {
+        type: "trustline" as const,
+        assetCode: "USDC",
+        issuer: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        limit: "1000",
+        reason: "spy builder test",
+      },
+    ]) {
+      const activityStore = new InMemoryActivityStore();
+      const approvalStore = new InMemoryApprovalStore();
+      const decision: PolicyDecision = {
+        result: "requires_approval",
+        reason: "Requires human approval",
+        rule: "approvalThreshold",
+        intent: testIntent,
+      };
+      const activity = createActivity("agent-1", "owner-1", testIntent, decision);
+      activity.status = "requires_approval";
+      activity.authorizationStatus = "pending_approval";
+      await activityStore.record(activity);
+
+      const approval = createApproval(
+        activity.id,
+        "agent-1",
+        "owner-1",
+        testIntent,
+        decision,
+        new Date(Date.now() + 60_000).toISOString(),
+      );
+      approval.status = "approved";
+      await approvalStore.record(approval);
+
+      const signer = new TestSigner();
+      const pipeline = new TransactionPipeline({
+        horizonUrl: HORIZON_URL,
+        networkPassphrase: PASSPHRASE,
+        signer,
+        activityStore,
+        approvalStore,
+        policyRules: {
+          maxTxAmount: { XLM: "100", USDC: "10000" },
+          dailySpendingLimit: { XLM: "500", USDC: "50000" },
+          allowedAssets: ["XLM", "USDC"],
+          requireHumanApprovalForAmountAbove: "100",
+          approvalThreshold: "100",
+          txTypeRestrictions: { payment: true, trustline: true },
+        },
+      });
+
+      const internals = pipeline as unknown as {
+        builder: {
+          buildPayment: () => Promise<object>;
+          buildTrustline: () => Promise<object>;
+        };
+        simulator: { simulate: () => Promise<object> };
+        submitter: { submit: () => Promise<{ hash: string; ledger: number }> };
+      };
+      internals.builder = {
+        buildPayment: async () => {
+          calls.push("buildPayment");
+          return { fakeTransaction: true };
+        },
+        buildTrustline: async () => {
+          calls.push("buildTrustline");
+          return { fakeTransaction: true };
+        },
+      };
+      internals.simulator = {
+        simulate: async () => ({ success: true, fee: "100", operations: 1, warnings: [] }),
+      };
+      internals.submitter = {
+        submit: async () => ({ hash: TX_HASH, ledger: 123 }),
+      };
+
+      const res = await pipeline.executeApproved(approval.id, "reviewer-1");
+      assert.equal(res.status, "submitted");
+    }
+
+    assert.deepEqual(calls, ["buildPayment", "buildTrustline"]);
+  });
+});
+

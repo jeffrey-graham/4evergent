@@ -345,7 +345,9 @@ export class TransactionPipeline {
 
     let tx;
     try {
-      if (intent.type === "account_settings") {
+      if (intent.type === "trustline") {
+        tx = await this.builder.buildTrustline(sourceAccount, intent as any, this.signer.getNetworkPassphrase());
+      } else if (intent.type === "account_settings") {
         tx = await this.builder.buildAccountSettings(sourceAccount, intent as AccountSettingsIntent, this.signer.getNetworkPassphrase());
       } else {
         tx = await this.builder.buildPayment(sourceAccount, intent as any, this.signer.getNetworkPassphrase());
