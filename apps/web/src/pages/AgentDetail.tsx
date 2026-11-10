@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../api';
 import { describeApiError } from '../apiErrors';
@@ -6,6 +6,7 @@ import type { AgentRecord, ActivityRecord, PolicyRules } from '../types';
 import { ScheduleManagement } from './ScheduleManagement';
 import { ExecutionList } from './ExecutionList';
 import { StatusBadge, Skeleton, EmptyState } from '../components';
+import { useApiResource } from '../hooks/useApiResource';
 
 type SpendingData = Record<string, { used: number; limit: string; remaining: number }>;
 
@@ -141,21 +142,13 @@ function deepClonePolicy(policy: PolicyRules): PolicyRules {
 }
 
 function PolicySummary({ agentId }: { agentId: string }) {
-  const [policy, setPolicy] = useState<PolicyRules | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await api.getPolicy(agentId);
-        if (!cancelled) setPolicy(res.policy);
-      } catch (e: any) {
-        if (!cancelled) setError(e.message ?? 'Failed to load policy summary');
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [agentId]);
+  const { data: policy, error } = useApiResource(
+    async () => {
+      const res = await api.getPolicy(agentId);
+      return res.policy;
+    },
+    [agentId],
+  );
 
   if (error) return null;
   if (!policy) return null;
@@ -201,32 +194,29 @@ function PolicySettings({ agentId }: { agentId: string }) {
   const [policy, setPolicy] = useState<PolicyRules | null>(null);
   const [version, setVersion] = useState<number | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [form, setForm] = useState<PolicyRules | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const res = await api.getPolicy(agentId);
-        if (cancelled) return;
-        setPolicy(deepClonePolicy(res.policy));
-        setForm(deepClonePolicy(res.policy));
-        setVersion(res.version);
-        setUpdatedAt(res.updatedAt);
-      } catch (e: any) {
-        if (!cancelled) setError(e.message ?? 'Failed to load policy');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [agentId]);
+  const {
+    data: loadedPolicy,
+    error: loadError,
+    loading,
+  } = useApiResource(
+    () => api.getPolicy(agentId),
+    [agentId],
+  );
+
+  const [syncedPolicy, setSyncedPolicy] = useState(loadedPolicy);
+  if (loadedPolicy && loadedPolicy !== syncedPolicy) {
+    setSyncedPolicy(loadedPolicy);
+    setPolicy(deepClonePolicy(loadedPolicy.policy));
+    setForm(deepClonePolicy(loadedPolicy.policy));
+    setVersion(loadedPolicy.version);
+    setUpdatedAt(loadedPolicy.updatedAt);
+    setSaveError(null);
+  }
 
   const updateForm = (patch: Partial<PolicyRules>) => {
     setForm((prev) => (prev ? { ...prev, ...patch } : prev));
@@ -269,7 +259,7 @@ function PolicySettings({ agentId }: { agentId: string }) {
     e.preventDefault();
     if (!form || saving) return;
     setSaving(true);
-    setError(null);
+    setSaveError(null);
     setSuccess(null);
     try {
       const res = await api.updatePolicy(agentId, form);
@@ -279,11 +269,13 @@ function PolicySettings({ agentId }: { agentId: string }) {
       setUpdatedAt(new Date().toISOString());
       setSuccess(`Policy updated (version ${res.version})`);
     } catch (e: any) {
-      setError(e.message ?? 'Failed to save policy');
+      setSaveError(e.message ?? 'Failed to save policy');
     } finally {
       setSaving(false);
     }
   };
+
+  const error = saveError ?? loadError;
 
   if (loading) return <Skeleton label="Loading policy..." />;
   if (error && !form) return <div className="error" role="alert">{error}</div>;
@@ -469,56 +461,55 @@ function PolicySettings({ agentId }: { agentId: string }) {
 
 export default function AgentDetail() {
   const agentId = useParams<{ agentId: string }>().agentId ?? '';
-  const [agent, setAgent] = useState<AgentRecord | null>(null);
-  const [activity, setActivity] = useState<ActivityRecord[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [reloadKey, setReloadKey] = useState(0);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
-  const [spending, setSpending] = useState<SpendingData | null>(null);
-  const [spendingError, setSpendingError] = useState<string | null>(null);
+  const [statusOverride, setStatusOverride] = useState<AgentRecord['status'] | null>(null);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await api.getAgentSpending(agentId);
-        setSpending(res.spending);
-      } catch (e: any) {
-        setSpendingError(e.message ?? 'Failed to load spending');
-      }
-    })();
-  }, [agentId]);
+  const {
+    data: spending,
+    error: spendingError,
+  } = useApiResource(
+    async () => {
+      const res = await api.getAgentSpending(agentId);
+      return res.spending;
+    },
+    [agentId],
+  );
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    (async () => {
-      try {
-        const [a, act] = await Promise.all([
-          api.getAgent(agentId),
-          api.agentActivity(agentId, 20),
-        ]);
-        if (cancelled) return;
-        setAgent(a);
-        setActivity(act.activity);
-      } catch (e: any) {
-        if (!cancelled) setError(e.message);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [agentId, reloadKey]);
+  const {
+    data: agentBundle,
+    error,
+    loading,
+    reload,
+  } = useApiResource(
+    async () => {
+      const [a, act] = await Promise.all([
+        api.getAgent(agentId),
+        api.agentActivity(agentId, 20),
+      ]);
+      return { agent: a as AgentRecord | null, activity: act.activity as ActivityRecord[] };
+    },
+    [agentId],
+  );
 
-  const retry = () => setReloadKey((k) => k + 1);
+  const [syncedBundle, setSyncedBundle] = useState(agentBundle);
+  if (agentBundle && agentBundle !== syncedBundle) {
+    setSyncedBundle(agentBundle);
+    setStatusOverride(null);
+  }
 
   if (loading) {
     return <Skeleton label="Loading agent..." />;
   }
   if (error) {
-    return <EmptyState title="Failed to load agent" message={error} error={true} actionLabel="Retry" onAction={retry} />;
+    return <EmptyState title="Failed to load agent" message={error} error={true} actionLabel="Retry" onAction={reload} />;
   }
+
+  const baseAgent = agentBundle?.agent ?? null;
+  const activity = agentBundle?.activity ?? null;
+  const agent = baseAgent
+    ? { ...baseAgent, status: statusOverride ?? baseAgent.status }
+    : null;
+
   if (!agent) {
     return (
       <div className="empty-state">
@@ -529,7 +520,7 @@ export default function AgentDetail() {
   }
 
   const handleStatusChange = (newStatus: string) => {
-    setAgent((prev) => prev ? { ...prev, status: newStatus as typeof prev.status } : prev);
+    setStatusOverride(newStatus as AgentRecord['status']);
   };
 
   return (
