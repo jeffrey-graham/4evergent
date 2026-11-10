@@ -351,3 +351,69 @@ test("approval does not leak secrets in response", async () => {
     await close();
   }
 });
+
+test("approval: policy tightened via PUT /agents/:id/policy before approve denies execution with policy message (#56)", async () => {
+  const rules: Partial<PolicyRules> = {
+    maxTxAmount: { XLM: "100" },
+    dailySpendingLimit: { XLM: "500" },
+    allowedAssets: ["XLM"],
+    approvalThreshold: "10",
+    requireHumanApprovalForAmountAbove: "10",
+  };
+  const { baseUrl, close, approvals } = await startServer({ policyRules: rules, deferExecution: false });
+  try {
+    // 1. Submit an intent for 50 XLM that passes initial policy (<= 100 XLM) and requires approval (> 10 XLM)
+    const intentRes = await post(baseUrl, "/agents/test-agent/intents", {
+      type: "payment",
+      asset: "XLM",
+      destination: Keypair.random().publicKey(),
+      amount: "50",
+      reason: "policy re-evaluation test",
+    });
+    assert.equal(intentRes.status, 202);
+    assert.equal(intentRes.body.status, "requires_approval");
+    const approvalId = intentRes.body.approvalId as string;
+    assert.ok(approvalId);
+
+    // 2. Tighten the agent policy via PUT /agents/:id/policy so maxTxAmount is now 20 XLM (< 50 XLM)
+    const policyRes = await fetch(`${baseUrl}/agents/test-agent/policy`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        maxTxAmount: { XLM: "20" },
+        dailySpendingLimit: { XLM: "500" },
+        allowedAssets: ["XLM"],
+        allowedDestinations: [],
+        allowedContractIds: [],
+        txTypeRestrictions: {
+          payment: true,
+          trustline: true,
+          contract_call: false,
+          account_settings: false,
+        },
+        approvalThreshold: "10",
+        requireHumanApprovalForAmountAbove: "10",
+      }),
+    });
+    assert.equal(policyRes.status, 200);
+
+    // 3. Approve the pending intent
+    const approveRes = await post(baseUrl, `/approvals/${approvalId}/approve`, { approver: "tester" });
+    assert.equal(approveRes.status, 200);
+
+    // 4. Wait for async executeApproved() to complete and assert it was denied by policy (not simulation or network error)
+    let updated = await approvals.get(approvalId);
+    for (let i = 0; i < 30 && updated?.status !== "failed"; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      updated = await approvals.get(approvalId);
+    }
+
+    assert.ok(updated, "approval record must exist");
+    assert.equal(updated!.status, "failed");
+    assert.ok(updated!.error, "approval error must be recorded");
+    assert.match(updated!.error!, /Policy re-evaluation denied:.*exceeds max tx limit/i);
+    assert.doesNotMatch(updated!.error!, /Simulation failed|Cannot load source account|network/i);
+  } finally {
+    await close();
+  }
+});

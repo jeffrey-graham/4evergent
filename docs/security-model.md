@@ -138,6 +138,17 @@ Approval state is recorded in the activity log. An approval is bound to a specif
 
 After approval, execution is enqueued through the persistent `ExecutionQueue` with retry and dead-letter semantics. If the process exits mid-execution, the `ExecutionRecoveryService` re-queues stuck records on startup.
 
+### Policy re-evaluation at approval time
+
+Human approval authorizes a high-value intent to proceed past the approval gate, but **approvals do not freeze policy**:
+
+1. **No policy snapshot at submission:** Creating an approval record (`pending_approval`) records the initial `policyDecision`, but does not lock in the policy rules that were active when the intent was submitted.
+2. **Current policy is re-evaluated at execution:** When an approved intent is executed via `TransactionPipeline.executeApproved()` (`packages/stellar/src/pipeline.ts`), the pipeline resolves and evaluates the agent's **current** policy rules immediately before constructing or simulating the Stellar transaction.
+3. **Tightened policy denies execution:** If an operator tightens the agent's policy between intent submission and approval execution (for example, lowering `maxTxAmount`, removing an asset from `allowedAssets`, restricting `allowedDestinations`, or disabling the transaction type), the re-evaluation returns `deny`. The pipeline aborts before account loading, construction, simulation, or signing, marking the approval `failed` with `Policy re-evaluation denied: <reason>`.
+4. **Daily-spending reservation is not double-counted (`skipReservation`):** Daily spending capacity is reserved when the intent is initially evaluated and queued for approval. During approval-time re-evaluation, `this.policy.evaluate(approval.intent, approval.agentId, { skipReservation: true })` checks all current limits (including whether the current `dailySpendingLimit` was lowered below the already-reserved total) without reserving the intent's amount a second time.
+
+See ADR-014 in [architecture.md](architecture.md) and the end-to-end test in `apps/api/test/approval-integration.test.ts`.
+
 ## Phase 5: Authorization & Ownership Model
 
 Every agent has an `ownerId`. Authorization is enforced server-side via `RequestContext` + `ResourceAuthorizationService`:

@@ -119,7 +119,20 @@ All decisions recorded via the ADR-lite convention. Each entry: **Status | Conte
 - No production authentication — `requestContext.ownerId` is set server-side (existing limitation)
 - `AgentRecord` has no secret fields by construction
 
-## ADR-014: Bounded retention sweeps for transient data
+## ADR-014: Policy re-evaluation at approval execution time
+
+**Status:** Accepted
+
+**Context:** When an intent crosses `approvalThreshold`, it enters `pending_approval` and waits for a human operator to approve it. While the intent is waiting in the approval queue, an operator may tighten the agent's policy (e.g., lowering `maxTxAmount`, lowering `dailySpendingLimit`, removing an allowed asset or destination, or disabling an operation type). We needed to decide whether human approval executes against the policy snapshot frozen at intent submission time, or re-evaluates the intent against the agent's current policy at execution time.
+
+**Decision:** Approvals do not freeze or bypass policy. `TransactionPipeline.executeApproved()` (`packages/stellar/src/pipeline.ts`) re-evaluates the intent against the agent's **current** policy at execution time via `this.policy.evaluate(approval.intent, approval.agentId, { skipReservation: true })`. We rejected the freeze-at-approval-time alternative because an operator tightening a policy in response to risk or anomalous activity expects the tighter limits to take effect immediately across all unexecuted intents, including those already queued for approval. Passing `{ skipReservation: true }` prevents double-counting the daily spending reservation that was already recorded when the intent was first submitted.
+
+**Consequences:**
+- An approved intent can still be denied at execution time if the agent's policy was tightened after the intent was submitted; the approval transitions to `failed` with `Policy re-evaluation denied: <reason>` before transaction construction, simulation, or signing.
+- Operators have an immediate, reliable control lever: lowering `maxTxAmount` or revoking an asset/destination blocks pending approvals without requiring manual rejection of each queued record.
+- Daily spending limits are not double-reserved on approval execution (`skipReservation: true`), while still enforcing the current `dailySpendingLimit` ceiling.
+
+## ADR-014 (Retention): Bounded retention sweeps for transient data
 
 **Status:** Accepted
 
