@@ -1,5 +1,6 @@
 // Stellar transaction pipeline
 export { StellarTransactionBuilder } from "./transaction-builder.js";
+export type { AssetIdentifier, SetOptionsInput, SetOptionsSignerInput } from "./transaction-builder.js";
 export { StellarSimulator } from "./simulator.js";
 export { StellarSubmitter } from "./submitter.js";
 export { TransactionPipeline } from "./pipeline.js";

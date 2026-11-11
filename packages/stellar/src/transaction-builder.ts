@@ -3,6 +3,7 @@ import {
   Operation,
   Asset,
   Memo,
+  StrKey,
   type Account,
   type Transaction,
 } from "@stellar/stellar-sdk";
@@ -11,6 +12,23 @@ import type { PaymentIntent, TrustlineIntent, AccountSettingsIntent } from "@4ev
 export interface AssetIdentifier {
   code: string;
   issuer: string | null;
+}
+
+export type SetOptionsSignerInput =
+  | { ed25519PublicKey: string; weight: number }
+  | { key: string; weight: number };
+
+export interface SetOptionsInput {
+  inflationDest?: string;
+  clearFlags?: number;
+  setFlags?: number;
+  masterWeight?: number;
+  lowThreshold?: number;
+  medThreshold?: number;
+  highThreshold?: number;
+  homeDomain?: string;
+  signer?: SetOptionsSignerInput;
+  memo?: string;
 }
 
 function parseAssetInput(input: { asset?: string; assetDetails?: { code: string; issuer: string | null } }): AssetIdentifier {
@@ -106,6 +124,103 @@ export class StellarTransactionBuilder {
     return builder.build();
   }
 
+  async buildSetOptions(
+    sourceAccount: Account,
+    options: SetOptionsInput,
+    networkPassphrase: string
+  ): Promise<Transaction> {
+    if (!options || typeof options !== "object") {
+      throw new Error("StellarTransactionBuilder: options object is required");
+    }
+
+    type SdkSetOptions = Parameters<typeof Operation.setOptions>[0];
+    const sdkOptions: SdkSetOptions = {};
+
+    if (options.inflationDest !== undefined) {
+      if (typeof options.inflationDest !== "string" || !StrKey.isValidEd25519PublicKey(options.inflationDest)) {
+        throw new Error("StellarTransactionBuilder: inflationDest must be a valid Stellar address (G...)");
+      }
+      sdkOptions.inflationDest = options.inflationDest;
+    }
+
+    if (options.clearFlags !== undefined) {
+      if (
+        typeof options.clearFlags !== "number" ||
+        !Number.isInteger(options.clearFlags) ||
+        options.clearFlags < 0 ||
+        options.clearFlags > 0xffffffff
+      ) {
+        throw new Error("StellarTransactionBuilder: clearFlags must be a non-negative integer");
+      }
+      sdkOptions.clearFlags = options.clearFlags as SdkSetOptions["clearFlags"];
+    }
+
+    if (options.setFlags !== undefined) {
+      if (
+        typeof options.setFlags !== "number" ||
+        !Number.isInteger(options.setFlags) ||
+        options.setFlags < 0 ||
+        options.setFlags > 0xffffffff
+      ) {
+        throw new Error("StellarTransactionBuilder: setFlags must be a non-negative integer");
+      }
+      sdkOptions.setFlags = options.setFlags as SdkSetOptions["setFlags"];
+    }
+
+    for (const field of ["masterWeight", "lowThreshold", "medThreshold", "highThreshold"] as const) {
+      const val = options[field];
+      if (val !== undefined) {
+        if (typeof val !== "number" || !Number.isInteger(val) || val < 0 || val > 255) {
+          throw new Error(`StellarTransactionBuilder: ${field} must be an integer between 0 and 255`);
+        }
+        sdkOptions[field] = val;
+      }
+    }
+
+    if (options.homeDomain !== undefined) {
+      if (typeof options.homeDomain !== "string" || new TextEncoder().encode(options.homeDomain).length > 32) {
+        throw new Error("StellarTransactionBuilder: homeDomain must be a string of at most 32 bytes");
+      }
+      sdkOptions.homeDomain = options.homeDomain;
+    }
+
+    if (options.signer !== undefined) {
+      if (typeof options.signer !== "object" || options.signer === null) {
+        throw new Error("StellarTransactionBuilder: signer must be an object with key/ed25519PublicKey and weight");
+      }
+      const pubKey =
+        "ed25519PublicKey" in options.signer
+          ? options.signer.ed25519PublicKey
+          : (options.signer as { key?: string }).key;
+      const weight = options.signer.weight;
+      if (typeof pubKey !== "string" || !StrKey.isValidEd25519PublicKey(pubKey)) {
+        throw new Error("StellarTransactionBuilder: signer key must be a valid Stellar address (G...)");
+      }
+      if (typeof weight !== "number" || !Number.isInteger(weight) || weight < 0 || weight > 255) {
+        throw new Error("StellarTransactionBuilder: signer.weight must be a number between 0 and 255");
+      }
+      sdkOptions.signer = { ed25519PublicKey: pubKey, weight };
+    }
+
+    if (Object.keys(sdkOptions).length === 0) {
+      throw new Error("StellarTransactionBuilder: at least one setOptions field must be provided");
+    }
+
+    const setOptionsOp = Operation.setOptions(sdkOptions);
+
+    const builder = new TransactionBuilder(sourceAccount, {
+      networkPassphrase,
+      fee: "100000",
+    });
+    if (options.memo !== undefined) {
+      builder.addMemo(Memo.text(truncateToMemo(options.memo)));
+    }
+    builder.addOperation(setOptionsOp);
+    builder.setTimeout(30);
+
+    return builder.build();
+  }
+
   async buildAccountSettings(
     sourceAccount: Account,
     intent: AccountSettingsIntent,
@@ -119,20 +234,10 @@ export class StellarTransactionBuilder {
     }
 
     const options = this.resolveAccountSettingsOptions(intent);
-    const setOptionsOp = Operation.setOptions(options as any);
-
-    const builder = new TransactionBuilder(sourceAccount, {
-      networkPassphrase,
-      fee: "100000",
-    });
-    builder.addMemo(Memo.text(truncateToMemo(intent.reason)));
-    builder.addOperation(setOptionsOp);
-    builder.setTimeout(30);
-
-    return builder.build();
+    return this.buildSetOptions(sourceAccount, { ...options, memo: intent.reason }, networkPassphrase);
   }
 
-  private resolveAccountSettingsOptions(intent: AccountSettingsIntent) {
+  private resolveAccountSettingsOptions(intent: AccountSettingsIntent): SetOptionsInput {
     const setting = intent.setting.trim().toLowerCase();
     const value = intent.value;
 
@@ -173,10 +278,10 @@ export class StellarTransactionBuilder {
           }
         }
         return {
-          lowThreshold: v.low,
-          medThreshold: v.medium,
-          highThreshold: v.high,
-          masterWeight: v.master,
+          lowThreshold: v.low as number,
+          medThreshold: v.medium as number,
+          highThreshold: v.high as number,
+          masterWeight: v.master as number,
         };
       }
       case "set_flags": {
